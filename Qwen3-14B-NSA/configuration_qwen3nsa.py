@@ -1,0 +1,116 @@
+# coding=utf-8
+# Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Qwen3 model configuration"""
+
+from transformers.configuration_utils import PretrainedConfig, layer_type_validation
+from transformers.modeling_rope_utils import rope_config_validation
+from transformers.utils import logging
+
+
+logger = logging.get_logger(__name__)
+
+
+class Qwen3NSAConfig(PretrainedConfig):
+    model_type = "qwen3nsa"
+
+    def __init__(
+            self,
+            vocab_size=151936,
+            hidden_size=4096,
+            intermediate_size=22016,
+            num_hidden_layers=32,
+            num_attention_heads=32,
+            num_key_value_heads=32,
+            head_dim=128,
+            hidden_act="silu",
+            max_position_embeddings=32768,
+            initializer_range=0.02,
+            rms_norm_eps=1e-6,
+            use_cache=True,
+            tie_word_embeddings=False,
+            rope_theta=10000.0,
+            rope_scaling=None,
+            attention_bias=False,
+            use_sliding_window=False,
+            sliding_window=4096,
+            max_window_layers=28,
+            layer_types=None,
+            attention_dropout=0.0,
+            nsa_compress_type="avgpool",  # Add NSA specific parameters
+            nsa_kernel_size=16,
+            nsa_kernel_stride=8,
+            nsa_block_size=32,
+            nsa_topk=6,
+            nsa_init_blocks=1,
+            nsa_local_blocks=2,
+            nsa_window_size=128,
+            **kwargs,
+    ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.tie_word_embeddings = tie_word_embeddings
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+        self.use_sliding_window = use_sliding_window
+        self.sliding_window = sliding_window if use_sliding_window else None
+        self.max_window_layers = max_window_layers
+
+        # For backward compatibility with 'num_key_value_heads'
+        if num_key_value_heads is None:
+            num_key_value_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+
+        # NSA specific configurations
+        self.nsa_compress_type = nsa_compress_type
+        self.nsa_kernel_size = nsa_kernel_size
+        self.nsa_kernel_stride = nsa_kernel_stride
+        self.nsa_block_size = nsa_block_size
+        self.nsa_topk = nsa_topk
+        self.nsa_init_blocks = nsa_init_blocks
+        self.nsa_local_blocks = nsa_local_blocks
+        self.nsa_window_size = nsa_window_size
+
+        # Validate rope scaling configurations
+        if self.rope_scaling is not None and "type" in self.rope_scaling:
+            self.rope_scaling["rope_type"] = self.rope_scaling["type"]
+
+        rope_config_validation(self)
+
+        self.layer_types = layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention"
+                if self.use_sliding_window and i >= self.max_window_layers
+                else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types)
+
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+
+
+__all__ = ["Qwen3NSAConfig"]
