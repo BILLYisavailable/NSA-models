@@ -144,22 +144,23 @@ COMPRESS_TYPE_TO_WEIGHT = {
 }
 
 
-def batch2cuseqlen(key_states: torch.Tensor, attention_mask: torch.Tensor) -> tuple:
+def batch2cuseqlen(key_states: torch.Tensor) -> tuple:
     batch_size, num_heads, seq_len, head_dim = key_states.shape
+    device = key_states.device
 
-    attention_mask = attention_mask.squeeze(1)[:, -1, :].squeeze(1)
-    seqlen = torch.sum(attention_mask, dim=1).squeeze(0)
-    cu_seqlen = torch.cat([torch.tensor([0], dtype=seqlen.dtype).cuda(), torch.cumsum(seqlen, dim=0)])
-
+    seqlens = []
     merged_key_states = []
 
-    total_seq_len = 0
     for i in range(batch_size):
-        valid_length = cu_seqlen[i + 1] - cu_seqlen[i]
-        total_seq_len += valid_length
-
+        nonzero_mask = key_states[i].abs().sum(dim=(0, 2)) > 0
+        valid_length = int(nonzero_mask.sum().item())
+        seqlens.append(valid_length)
         key_sequence = key_states[i, :, :valid_length, :]
         merged_key_states.append(key_sequence)
+
+    seqlens = torch.tensor(seqlens, dtype=torch.int32, device=device)
+    cu_seqlen = torch.cat([torch.tensor([0], dtype=torch.int32, device=device),
+                           torch.cumsum(seqlens, dim=0)])
 
     merged_key_states = torch.cat(merged_key_states, dim=1)
     return merged_key_states.transpose(0, 1), cu_seqlen
@@ -255,9 +256,9 @@ class Qwen3NSAAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        key_states, cu_seqlens = batch2cuseqlen(key_states, attention_mask)
-        value_states, _ = batch2cuseqlen(value_states, attention_mask)
-        query_states, _ = batch2cuseqlen(query_states, attention_mask)
+        key_states, cu_seqlens = batch2cuseqlen(key_states)
+        value_states, _ = batch2cuseqlen(value_states)
+        query_states, _ = batch2cuseqlen(query_states)
 
         compressed_key_states, compressed_cu_seqlens = self.nsa_compress_func(
             key_states,
@@ -350,21 +351,35 @@ class Qwen3NSAAttention(nn.Module):
                 causal=True,
                 window_size=(self.nsa_window_size, -1),
             )
+        if step == 0:
+            compressed_attn_output = cuseqlen2batch(compressed_attn_output, cu_seqlens, self.config.num_attention_heads, self.head_dim)
+            sparse_attn_output = cuseqlen2batch(sparse_attn_output, cu_seqlens, self.config.num_attention_heads, self.head_dim)
+            sliding_attn_output = cuseqlen2batch(sliding_attn_output, cu_seqlens, self.config.num_attention_heads, self.head_dim)
 
-        # gate = self.nsa_gate_proj(hidden_states)
+        else:
+            compressed_attn_output = cuseqlen2batch(compressed_attn_output,
+                                         torch.arange(0, compressed_attn_output.shape[0] + 1, dtype=torch.int32, device="cuda"),
+                                         self.config.num_attention_heads, self.head_dim)
+            sparse_attn_output = cuseqlen2batch(sparse_attn_output,
+                                                    torch.arange(0, sparse_attn_output.shape[0] + 1, dtype=torch.int32,
+                                                                 device="cuda"),
+                                                    self.config.num_attention_heads, self.head_dim)
+            sliding_attn_output = cuseqlen2batch(sliding_attn_output,
+                                                    torch.arange(0, sliding_attn_output.shape[0] + 1, dtype=torch.int32,
+                                                                 device="cuda"),
+                                                    self.config.num_attention_heads, self.head_dim)
+
+        gate = self.nsa_gate_proj(hidden_states)
         # print(gate.shape)
-        # gate = gate.view(cu_seqlens[-1], self.config.num_attention_heads, self.head_dim)
+        gate = gate.view(hidden_states.shape[0], hidden_states.shape[1], self.config.num_attention_heads, self.head_dim, 3)
         # print(compressed_attn_output.shape, sparse_attn_output.shape, sliding_attn_output.shape, gate.shape)
         # attn_output = (
         #         gate[..., 0:1].squeeze(-1) * compressed_attn_output +
         #         gate[..., 1:2].squeeze(-1) * sparse_attn_output +
         #         gate[..., 2:3].squeeze(-1) * sliding_attn_output
         # )
-        attn_output = sliding_attn_output
-        if step==0:
-            attn_output = cuseqlen2batch(attn_output, cu_seqlens, self.config.num_attention_heads, self.head_dim)
-        else:
-            attn_output = cuseqlen2batch(attn_output, torch.arange(0, attn_output.shape[0] + 1, dtype=torch.int32, device="cuda"), self.config.num_attention_heads, self.head_dim)
+        attn_output = (compressed_attn_output + sparse_attn_output + sliding_attn_output)*0.33
+        # attn_output = sliding_attn_output
         attn_output = attn_output.reshape(attn_output.shape[0], attn_output.shape[1],
                                           attn_output.shape[2] * attn_output.shape[3])
         attn_output = self.o_proj(attn_output)
@@ -511,6 +526,7 @@ class Qwen3NSAModel(Qwen3NSAPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
+        use_cache=False
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
