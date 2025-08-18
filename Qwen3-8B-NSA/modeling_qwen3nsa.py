@@ -208,7 +208,7 @@ class Qwen3NSAAttention(nn.Module):
 
         self.nsa_compress_type = config.nsa_compress_type
         self.nsa_gate_proj = torch.nn.Sequential(
-            torch.nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim * 3, bias=False),
+            torch.nn.Linear(config.hidden_size, config.num_attention_heads * 3, bias=False),
             torch.nn.Sigmoid(),
         )
         self.nsa_compress_key = COMPRESS_TYPE_TO_WEIGHT[self.nsa_compress_type](
@@ -371,14 +371,14 @@ class Qwen3NSAAttention(nn.Module):
 
         gate = self.nsa_gate_proj(hidden_states)
         # print(gate.shape)
-        gate = gate.view(hidden_states.shape[0], hidden_states.shape[1], self.config.num_attention_heads, self.head_dim, 3)
+        gate = gate.view(hidden_states.shape[0], hidden_states.shape[1], self.config.num_attention_heads, 1, 3).expand(-1, -1, -1, self.head_dim, -1)
         # print(compressed_attn_output.shape, sparse_attn_output.shape, sliding_attn_output.shape, gate.shape)
-        # attn_output = (
-        #         gate[..., 0:1].squeeze(-1) * compressed_attn_output +
-        #         gate[..., 1:2].squeeze(-1) * sparse_attn_output +
-        #         gate[..., 2:3].squeeze(-1) * sliding_attn_output
-        # )
-        attn_output = (compressed_attn_output + sparse_attn_output + sliding_attn_output)*0.33
+        attn_output = (
+                gate[..., 0:1].squeeze(-1) * compressed_attn_output +
+                gate[..., 1:2].squeeze(-1) * sparse_attn_output +
+                gate[..., 2:3].squeeze(-1) * sliding_attn_output
+        )
+        # attn_output = (compressed_attn_output + sparse_attn_output + sliding_attn_output)*0.33
         # attn_output = sliding_attn_output
         attn_output = attn_output.reshape(attn_output.shape[0], attn_output.shape[1],
                                           attn_output.shape[2] * attn_output.shape[3])
